@@ -5,6 +5,7 @@ ny `platform` sy `user_id` dia avy amin'ny webhook fa tsy avy amin'ny modèle.
 """
 
 import json
+import os
 import sqlite3
 
 from anthropic import beta_tool
@@ -12,6 +13,20 @@ from anthropic import beta_tool
 from . import db
 
 MAX_ROWS = 50
+
+# SQL mamoaka ny kaomandin'ilay mpanjifa miresaka. Ampifanaraho amin'ny base-nareo ao amin'ny .env.
+# Paramètres azo ampiasaina: :platform, :user_id, :phone_intl, :phone_plus, :phone_local
+DEFAULT_ORDERS_SQL = (
+    "SELECT o.id, o.status, o.total, o.created_at, o.delivery_address, "
+    "group_concat(oi.quantity || ' x ' || p.name, ', ') AS items "
+    "FROM customers c JOIN orders o ON o.customer_id = c.id "
+    "LEFT JOIN order_items oi ON oi.order_id = o.id "
+    "LEFT JOIN products p ON p.id = oi.product_id "
+    "WHERE (c.platform = :platform AND c.platform_user_id = :user_id) "
+    "   OR (:platform = 'whatsapp' AND c.phone IN (:phone_intl, :phone_plus, :phone_local)) "
+    "GROUP BY o.id ORDER BY o.created_at DESC"
+)
+ORDERS_SQL = os.environ.get("CUSTOMER_ORDERS_SQL", DEFAULT_ORDERS_SQL)
 
 
 def _rows_to_json(rows: list[sqlite3.Row]) -> str:
@@ -26,65 +41,12 @@ def build_tools(platform: str, user_id: str) -> list:
     """Mamorona ny tools mifatotra amin'ilay mpanjifa miresaka."""
 
     @beta_tool
-    def search_products(query: str, max_price: float | None = None) -> str:
-        """Mitady vokatra amin'ny anarana na famaritana (stock sy vidiny tafiditra).
+    def query_database(query: str) -> str:
+        """Manatanteraka fangatahana SQL SELECT (SQLite) amin'ny base an'ny fivarotana:
+        vokatra, stock, vidiny, sokajy, FAQ, sns. Jereo ao amin'ny prompt ny schéma.
 
-        Args:
-            query: Teny hotadiavina, ohatra "kiraro", "t-shirt mena".
-            max_price: Vidiny ambony indrindra (Ariary), tsy voatery.
-        """
-        sql = (
-            "SELECT p.id, p.name, p.description, p.price, p.stock, c.name AS category "
-            "FROM products p LEFT JOIN categories c ON c.id = p.category_id "
-            "WHERE (p.name LIKE ? OR p.description LIKE ? OR c.name LIKE ?)"
-        )
-        like = f"%{query}%"
-        params: list = [like, like, like]
-        if max_price is not None:
-            sql += " AND p.price <= ?"
-            params.append(max_price)
-        with db.readonly_connection() as conn:
-            return _rows_to_json(conn.execute(sql + " ORDER BY p.name", params).fetchall())
-
-    @beta_tool
-    def search_faq(query: str) -> str:
-        """Mitady valiny ao amin'ny FAQ (fandoavam-bola, fandefasana, fiverenana entana, ora fisokafana...).
-
-        Args:
-            query: Teny fanalahidy hotadiavina.
-        """
-        like = f"%{query}%"
-        with db.readonly_connection() as conn:
-            rows = conn.execute(
-                "SELECT question, answer FROM faq WHERE question LIKE ? OR answer LIKE ? OR tags LIKE ?",
-                (like, like, like),
-            ).fetchall()
-        return _rows_to_json(rows)
-
-    @beta_tool
-    def get_my_orders() -> str:
-        """Mamoaka ny kaomandin'ilay mpanjifa miresaka izao (statut, total, entana)."""
-        with db.readonly_connection() as conn:
-            rows = conn.execute(
-                "SELECT o.id, o.status, o.total, o.created_at, o.delivery_address, "
-                "group_concat(oi.quantity || ' x ' || p.name, ', ') AS items "
-                "FROM customers c JOIN orders o ON o.customer_id = c.id "
-                "LEFT JOIN order_items oi ON oi.order_id = o.id "
-                "LEFT JOIN products p ON p.id = oi.product_id "
-                "WHERE c.platform = ? AND c.platform_user_id = ? "
-                "GROUP BY o.id ORDER BY o.created_at DESC",
-                (platform, user_id),
-            ).fetchall()
-        if not rows:
-            return json.dumps({"rows": [], "note": "Tsy misy kaomandy mifandray amin'ity kaonty ity."})
-        return _rows_to_json(rows)
-
-    @beta_tool
-    def run_readonly_sql(query: str) -> str:
-        """Manatanteraka fangatahana SQL SELECT (SQLite) amin'ny tables ankapobeny ihany.
-
-        Ampiasao rehefa tsy ampy ireo tools hafa. Tsy azo atao ny manova data, ary
-        tsy azo vakiana ny tables misy mombamomba ny mpanjifa.
+        Tsy azo atao ny manova data, ary ireo tables voatanisa ao amin'ny schéma ihany no azo vakiana.
+        Ampiasao `LIKE '%...%'` rehefa mitady anarana, satria mety tsy mitovy tsara ny soratra.
 
         Args:
             query: Fangatahana SELECT iray monja.
@@ -96,14 +58,27 @@ def build_tools(platform: str, user_id: str) -> list:
             return f"Error: {e}. Schéma azo vakiana:\n{db.describe_schema()}"
 
     @beta_tool
+    def get_my_orders() -> str:
+        """Mamoaka ny kaomandin'ilay mpanjifa miresaka izao (statut, total, entana)."""
+        params = {"platform": platform, "user_id": user_id, **db.phone_variants(user_id)}
+        try:
+            with db.readonly_connection() as conn:
+                rows = conn.execute(ORDERS_SQL, params).fetchall()
+        except sqlite3.Error as e:
+            return f"Error: tsy azo jerena ny kaomandy ({e})."
+        if not rows:
+            return json.dumps({"rows": [], "note": "Tsy misy kaomandy mifandray amin'ity kaonty/laharana ity."})
+        return _rows_to_json(rows)
+
+    @beta_tool
     def escalate_to_human(reason: str) -> str:
         """Mampandre olona ao amin'ny ekipa mba handray ny resaka (fitarainana, famerenam-bola,
-        fangatahana tsy hain'ny agent, na raha mangataka olona ilay mpanjifa).
+        kaomandy vonona hamarinina, fangatahana tsy hain'ny agent, na raha mangataka olona ilay mpanjifa).
 
         Args:
-            reason: Fehintenin'ny olana ho an'ny ekipa.
+            reason: Fehintenin'ny olana na ny kaomandy ho an'ny ekipa (vokatra, isa, adiresy, laharana...).
         """
         db.set_needs_human(platform, user_id, reason)
         return "Voaray. Hiditra amin'ny resaka ny ekipa; tsy hamaly ho azy intsony ny agent."
 
-    return [search_products, search_faq, get_my_orders, run_readonly_sql, escalate_to_human]
+    return [query_database, get_my_orders, escalate_to_human]

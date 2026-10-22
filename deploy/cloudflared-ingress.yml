@@ -1,0 +1,11 @@
+# Ampio ao amin'ny config cloudflared efa misy (ohatra /etc/cloudflared/config.yml),
+# ALOHAN'NY règle farany `- service: http_status:404`.
+ingress:
+  - hostname: bot.infinity-stockflow.store
+    service: http://localhost:8000
+  # ... ireo règles efa misy ...
+  - service: http_status:404
+
+# Avy eo:
+#   cloudflared tunnel route dns <ANARAN-NY-TUNNEL> bot.infinity-stockflow.store
+#   sudo systemctl restart cloudflared

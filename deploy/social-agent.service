@@ -1,0 +1,15 @@
+# /etc/systemd/system/social-agent.service
+[Unit]
+Description=Agent service client (Facebook / WhatsApp)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/social-agent
+EnvironmentFile=/opt/social-agent/.env
+# 1 worker ihany (ny verrou isaky ny mpanjifa dia ao anaty mémoire), threads maromaro
+ExecStart=/opt/social-agent/.venv/bin/gunicorn -w 1 --threads 8 -b 127.0.0.1:8000 social_agent.webhook:app
+Restart=always
+User=www-data
+
+[Install]
+WantedBy=multi-user.target
